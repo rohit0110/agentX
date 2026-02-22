@@ -88,20 +88,22 @@ export class AgentRunner extends EventEmitter {
           getSolanaPrice: getSolanaPriceTool,
           buildMockSwapTx: buildMockSwapTxTool,
         },
-        onChunk: ({ chunk }) => {
-          if (chunk.type === "text-delta") {
-            this.emit("agent_delta", sessionId, chunk.textDelta);
-          } else if (chunk.type === "tool-call") {
-            // AI SDK v4 uses `args` on tool-call chunks
-            this.emit("tool_call", sessionId, chunk.toolName, (chunk as Record<string, unknown>).args);
-          } else if (chunk.type === "tool-result") {
-            this.emit("tool_result", sessionId, chunk.toolName, chunk.result);
-          }
-        },
       });
 
-      // streamText returns a StreamTextResult — `.text` is the Promise<string>
-      const text = await result.text;
+      // Consume fullStream and accumulate text as we go
+      let fullText = "";
+      for await (const chunk of result.fullStream) {
+        if (chunk.type === "text-delta") {
+          fullText += chunk.textDelta;
+          this.emit("agent_delta", sessionId, chunk.textDelta);
+        } else if (chunk.type === "tool-call") {
+          this.emit("tool_call", sessionId, chunk.toolName, chunk.args);
+        } else if (chunk.type === "tool-result") {
+          this.emit("tool_result", sessionId, chunk.toolName, chunk.result);
+        }
+      }
+
+      const text = fullText;
 
       // Persist agent response
       await sql`
@@ -109,6 +111,7 @@ export class AgentRunner extends EventEmitter {
         VALUES (${sessionId}, ${"agent"}, ${text})
       `;
 
+      console.log(`[AgentRunner] done session=${sessionId} chars=${text.length}`);
       this.emit("agent_done", sessionId, text);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

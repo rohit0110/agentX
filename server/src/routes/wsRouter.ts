@@ -48,15 +48,16 @@ const wsRouter: FastifyPluginAsync = async (fastify) => {
       agentRunner.on("tool_result", onToolResult);
       agentRunner.on("error", onError);
 
-      socket.socket.on("message", (raw: Buffer) => {
+      // SocketStream is a Duplex — use the stream `data` event for incoming messages
+      socket.on("data", (raw: Buffer) => {
+        const str = raw.toString().trim();
+        if (!str) return; // skip empty frames (pings, control data)
+
         let parsed: unknown;
         try {
-          parsed = JSON.parse(raw.toString());
+          parsed = JSON.parse(str);
         } catch {
-          send(socket, {
-            type: "error",
-            payload: { session_id: "", message: "Invalid JSON" },
-          });
+          console.warn("[ws] non-JSON frame, ignoring:", str.slice(0, 80));
           return;
         }
 
@@ -81,7 +82,7 @@ const wsRouter: FastifyPluginAsync = async (fastify) => {
         }
       });
 
-      socket.socket.on("close", () => {
+      socket.on("close", () => {
         console.log("[ws] client disconnected");
         agentRunner.off("agent_delta", onDelta);
         agentRunner.off("agent_done", onDone);
@@ -90,7 +91,7 @@ const wsRouter: FastifyPluginAsync = async (fastify) => {
         agentRunner.off("error", onError);
       });
 
-      socket.socket.on("error", (err: Error) => {
+      socket.on("error", (err: Error) => {
         console.error("[ws] socket error", err.message);
       });
     }
