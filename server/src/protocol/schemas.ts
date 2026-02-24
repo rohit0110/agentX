@@ -18,9 +18,29 @@ export const InboundPingSchema = z.object({
   type: z.literal("ping"),
 });
 
+// Client acknowledges a tx was signed by the mobile wallet
+export const TxSignedSchema = z.object({
+  type: z.literal("tx_signed"),
+  payload: z.object({
+    tx_id: z.string(),
+    signature: z.string(), // base58 Solana tx signature
+  }),
+});
+
+// Client rejects a signing request
+export const TxRejectedSchema = z.object({
+  type: z.literal("tx_rejected"),
+  payload: z.object({
+    tx_id: z.string(),
+    reason: z.string().optional(),
+  }),
+});
+
 export const InboundMessageSchema = z.discriminatedUnion("type", [
   InboundPromptSchema,
   InboundPingSchema,
+  TxSignedSchema,
+  TxRejectedSchema,
 ]);
 
 // ---------------------------------------------------------------------------
@@ -73,6 +93,26 @@ export const PongSchema = z.object({
   type: z.literal("pong"),
 });
 
+// Server pushes a tx that needs to be signed by the mobile wallet
+export const TxSigningRequestSchema = z.object({
+  type: z.literal("tx_signing_request"),
+  payload: z.object({
+    tx_id: z.string(),
+    from_token: z.string(),
+    to_token: z.string(),
+    amount: z.number(),
+    serialized_tx: z.string(), // base64-encoded serialized transaction
+    trigger: z.object({
+      alert_id: z.number(),
+      token: z.string(),
+      target_price: z.number(),
+      triggered_price: z.number(),
+      direction: z.enum(["above", "below"]),
+    }),
+    expires_at: z.string(), // ISO 8601 — client should refuse after this
+  }),
+});
+
 export const OutboundMessageSchema = z.discriminatedUnion("type", [
   AgentDeltaSchema,
   AgentDoneSchema,
@@ -80,6 +120,7 @@ export const OutboundMessageSchema = z.discriminatedUnion("type", [
   ToolResultSchema,
   ErrorMessageSchema,
   PongSchema,
+  TxSigningRequestSchema,
 ]);
 
 // ---------------------------------------------------------------------------
@@ -110,6 +151,9 @@ export type AgentDone = z.infer<typeof AgentDoneSchema>;
 export type ToolCall = z.infer<typeof ToolCallSchema>;
 export type ToolResult = z.infer<typeof ToolResultSchema>;
 export type ErrorMessage = z.infer<typeof ErrorMessageSchema>;
+export type TxSigningRequest = z.infer<typeof TxSigningRequestSchema>;
+export type TxSigned = z.infer<typeof TxSignedSchema>;
+export type TxRejected = z.infer<typeof TxRejectedSchema>;
 export type OutboundMessage = z.infer<typeof OutboundMessageSchema>;
 export type PromptRequest = z.infer<typeof PromptRequestSchema>;
 export type Message = z.infer<typeof MessageSchema>;

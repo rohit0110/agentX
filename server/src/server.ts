@@ -4,6 +4,9 @@ import websocketPlugin from "@fastify/websocket";
 import healthRouter from "./routes/healthRouter";
 import agentRouter from "./routes/agentRouter";
 import wsRouter from "./routes/wsRouter";
+import ordersRouter from "./routes/ordersRouter";
+import simulateRouter from "./routes/simulateRouter";
+import deviceRouter from "./routes/deviceRouter";
 
 export async function buildServer() {
   const fastify = Fastify({
@@ -22,6 +25,9 @@ export async function buildServer() {
   await fastify.register(healthRouter);
   await fastify.register(agentRouter);
   await fastify.register(wsRouter);
+  await fastify.register(ordersRouter);
+  await fastify.register(simulateRouter);
+  await fastify.register(deviceRouter);
 
   return fastify;
 }

@@ -3,6 +3,7 @@ import { useFonts } from 'expo-font'
 import { Stack } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
 import { AppProviders } from '@/components/app-providers'
+import { AgentTxModal } from '@/components/agent/agent-tx-modal'
 import { useEffect } from 'react'
 import * as SplashScreen from 'expo-splash-screen'
 import { View } from 'react-native'
@@ -21,6 +22,7 @@ export default function RootLayout() {
     <View style={{ flex: 1 }}>
       <AppProviders>
         <RootNavigator />
+        <AgentTxModal />
         <StatusBar style="auto" />
       </AppProviders>
       <PortalHost />

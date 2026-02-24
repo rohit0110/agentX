@@ -1,5 +1,5 @@
 import { useMobileWallet } from '@wallet-ui/react-native-web3js'
-import { createContext, PropsWithChildren, use, useMemo } from 'react'
+import { createContext, PropsWithChildren, use, useEffect, useMemo } from 'react'
 
 export interface AuthState {
   isAuthenticated: boolean
@@ -18,6 +18,10 @@ export function useAuth() {
 
 export function AuthProvider({ children }: PropsWithChildren) {
   const { account, connect, disconnect } = useMobileWallet()
+
+  useEffect(() => {
+    if (account) console.log('[auth] connected:', account.address.toString())
+  }, [account])
 
   const value = useMemo<AuthState>(
     () => ({
