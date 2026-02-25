@@ -69,7 +69,7 @@ function isExpired(expires_at: string): boolean {
 }
 
 export function AgentProvider({ children }: PropsWithChildren) {
-  const { signAndSendTransaction } = useMobileWallet()
+  const { account, connect, signAndSendTransaction } = useMobileWallet()
 
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [toolActivity, setToolActivity] = useState<ToolActivity | null>(null)
@@ -97,7 +97,6 @@ export function AgentProvider({ children }: PropsWithChildren) {
         if (!res.ok) return
         const data = await res.json()
         const filtered = (data.messages as Array<{ id: number; session_id: string; role: string; content: string }>)
-          .filter((m) => m.session_id === id)
           .map((m) => ({ id: String(m.id), role: m.role as 'user' | 'agent', content: m.content, streaming: false }))
         setMessages(filtered)
       } catch {
@@ -125,6 +124,22 @@ export function AgentProvider({ children }: PropsWithChildren) {
       ws.onopen = () => {
         setStatus('connected')
         reconnectDelay = 1_000
+        // Re-fetch history to pick up any agent responses produced while offline
+        if (sessionIdRef.current) {
+          fetch(`${AgentConfig.apiUrl}/agent/history`, {
+            headers: { 'X-Api-Key': AgentConfig.apiKey },
+          })
+            .then((r) => r.json())
+            .then((data) => {
+              const id = sessionIdRef.current!
+              const updated = (
+                data.messages as Array<{ id: number; session_id: string; role: string; content: string }>
+              )
+                .map((m) => ({ id: String(m.id), role: m.role as 'user' | 'agent', content: m.content, streaming: false }))
+              setMessages(updated)
+            })
+            .catch(() => {})
+        }
       }
 
       ws.onmessage = (event: MessageEvent<string>) => {
@@ -144,7 +159,15 @@ export function AgentProvider({ children }: PropsWithChildren) {
               const text = msg.payload.text as string
               setMessages((prev) => {
                 const last = prev[prev.length - 1]
-                if (last?.streaming) return [...prev.slice(0, -1), { ...last, content: text, streaming: false }]
+                if (last?.streaming) {
+                  // Finalise the streaming bubble — use fullText from server if available,
+                  // otherwise keep whatever deltas we accumulated (handles race conditions).
+                  const finalContent = text || last.content
+                  if (!finalContent) return prev.slice(0, -1) // drop empty bubble
+                  return [...prev.slice(0, -1), { ...last, content: finalContent, streaming: false }]
+                }
+                // No streaming bubble yet (tool-first response — model called a tool then wrote text).
+                if (text) return [...prev, { id: crypto.randomUUID(), role: 'agent', content: text, streaming: false }]
                 return prev
               })
               setIsThinking(false)
@@ -211,6 +234,9 @@ export function AgentProvider({ children }: PropsWithChildren) {
     }
 
     try {
+      if (!account) {
+        await connect()
+      }
       const tx = VersionedTransaction.deserialize(Base64.toUint8Array(req.serialized_tx))
       const signature = await signAndSendTransaction(tx, 0)
       wsRef.current?.send(
@@ -224,7 +250,7 @@ export function AgentProvider({ children }: PropsWithChildren) {
     }
 
     setPending(null)
-  }, [signAndSendTransaction])
+  }, [account, connect, signAndSendTransaction])
 
   const rejectTx = useCallback((reason = 'user_declined') => {
     const req = pendingTxRef.current

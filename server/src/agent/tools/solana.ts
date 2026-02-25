@@ -129,7 +129,7 @@ export const queueSigningRequestTool = tool({
 
     clientRegistry.broadcast(wsMsg);
 
-    await sendPushToDevices("OpenClaw: Trade Ready to Sign", reason, {
+    await sendPushToDevices("agentX: Trade Ready to Sign", reason, {
       type: "tx_signing_request",
       tx_id: tx.tx_id,
     });

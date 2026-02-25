@@ -27,7 +27,7 @@ export function AgentInputBar({ onSend, disabled, status }: Props) {
   }
 
   const placeholder =
-    status === 'connecting' ? 'Connecting...' : status === 'disconnected' ? 'Reconnecting...' : 'Ask OpenClaw...'
+    status === 'connecting' ? 'Connecting...' : status === 'disconnected' ? 'Reconnecting...' : 'Ask agentX...'
 
   return (
     <View style={[styles.container, { borderTopColor: borderColor, backgroundColor }]}>

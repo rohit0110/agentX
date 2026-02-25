@@ -37,6 +37,7 @@ const agentRouter: FastifyPluginAsync = async (fastify) => {
     const messages = await sql`
       SELECT id, session_id, role, content, created_at
       FROM messages
+      WHERE NOT (role = 'user' AND content LIKE '[SYSTEM%')
       ORDER BY id ASC
     `;
     return reply.send({ messages });

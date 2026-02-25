@@ -37,7 +37,7 @@ function EmptyState({ status }: { status: string }) {
   const textColor = useThemeColor({}, 'icon')
   const label =
     status === 'connected'
-      ? 'Ask OpenClaw to fetch prices, build swap transactions, or discuss trading strategies.'
+      ? 'Ask agentX to fetch prices, build swap transactions, or discuss trading strategies.'
       : status === 'connecting'
         ? 'Connecting to agent...'
         : 'Reconnecting...'
