@@ -1,7 +1,7 @@
 import { FastifyPluginAsync } from "fastify";
 import Expo from "expo-server-sdk";
 import { z } from "zod";
-import { registerDevice } from "../db/alertsDb";
+import { registerDevice, getDevicePushTokens } from "../db/alertsDb";
 
 const API_KEY = process.env.API_KEY ?? "change_me";
 
@@ -33,6 +33,14 @@ const deviceRouter: FastifyPluginAsync = async (fastify) => {
 
     await registerDevice(push_token);
     return reply.code(201).send({ ok: true });
+  });
+
+  fastify.get("/device/tokens", async (req, reply) => {
+    if (req.headers["x-api-key"] !== API_KEY) {
+      return reply.code(401).send({ error: "Unauthorized" });
+    }
+    const tokens = await getDevicePushTokens();
+    return reply.send({ count: tokens.length, tokens });
   });
 };
 

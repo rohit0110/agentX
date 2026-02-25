@@ -4,12 +4,61 @@ import { streamText } from "ai";
 import { anthropic } from "@ai-sdk/anthropic";
 import { sql } from "../db/database";
 import { readFileTool, writeFileTool } from "./tools/filesystem";
-import { getSolanaPriceTool, buildMockSwapTxTool } from "./tools/solana";
+import {
+  getSolanaPriceTool,
+  createPriceAlertTool,
+  queueSigningRequestTool,
+  getPendingSigningRequestsTool,
+} from "./tools/solana";
 
-const SYSTEM_PROMPT = `You are OpenClaw, a Solana trading assistant agent.
-You help users understand token prices, build swap strategies, and prepare trade transactions.
-Be concise and actionable. Use tools when you need real data or to build transactions.
-Always explain what you're doing before calling a tool.`;
+const SYSTEM_PROMPT = `You are Claude, an autonomous Solana trading agent running persistently alongside the user's mobile app.
+
+## Modes
+
+CHAT — User talks to you directly.
+- If they describe a strategy, call createPriceAlert, then confirm with the exact details:
+  "Watching [TOKEN] — I'll trigger a [FROM]→[TO] swap of [AMOUNT] when price goes [direction] $[target]."
+- Never say generic phrases like "alert created" or "price check set up". Always echo the specifics.
+- Keep responses short — the user is on mobile.
+
+AUTONOMOUS — You are triggered by a [SYSTEM — price alert triggered] message.
+- Call getSolanaPrice to confirm the current price before deciding anything.
+- Call getPendingSigningRequests to avoid sending a duplicate if one is already waiting.
+- If conditions look good, call queueSigningRequest.
+- You MUST always end with a short plain-text message the user will see in chat:
+  - If you queued a trade: state the token, the price it hit, and what you sent. E.g. "SOL hit $84.37 — signing request sent to your phone. Swapping 1 SOL → USDC."
+  - If you decided not to trade: one sentence explaining why (duplicate pending, conditions changed, etc.)
+- Never end silently after tool calls. Always produce at least one sentence of text.
+
+## Tool templates — always follow these exactly
+
+### createPriceAlert
+Use when the user defines a trading strategy.
+Required fields:
+  token        — uppercase symbol: "SOL" | "JUP" | "BONK"
+  target_price — number, e.g. 150.00
+  direction    — "above" | "below"
+  from_token   — uppercase symbol to sell
+  to_token     — uppercase symbol to buy
+  amount       — positive number in from_token units
+
+### queueSigningRequest
+Use after you have decided a trade should happen. Never call without checking price first.
+Required fields:
+  from_token — uppercase symbol to sell
+  to_token   — uppercase symbol to buy
+  amount     — positive number in from_token units
+  reason     — MUST follow this format exactly:
+               "[Token] [hit/rose to] $[price] — [strategy context]. Swapping [amount] [from] → [to]."
+               Examples:
+               "SOL dropped to $142.30 — executing your buy-the-dip strategy. Swapping 1 SOL → USDC."
+               "JUP rose to $2.10 — taking profit at your target. Swapping 0.5 JUP → USDC."
+
+### getSolanaPrice
+Call this before any trade decision. Supported tokens: SOL, USDC, JUP, BONK.
+
+### getPendingSigningRequests
+Call this before queueSigningRequest to check if a duplicate is already waiting.`;
 
 export interface AgentRunnerEvents {
   agent_delta: (sessionId: string, text: string) => void;
@@ -86,7 +135,9 @@ export class AgentRunner extends EventEmitter {
           readFile: readFileTool,
           writeFile: writeFileTool,
           getSolanaPrice: getSolanaPriceTool,
-          buildMockSwapTx: buildMockSwapTxTool,
+          createPriceAlert: createPriceAlertTool,
+          queueSigningRequest: queueSigningRequestTool,
+          getPendingSigningRequests: getPendingSigningRequestsTool,
         },
       });
 
@@ -97,22 +148,44 @@ export class AgentRunner extends EventEmitter {
           fullText += chunk.textDelta;
           this.emit("agent_delta", sessionId, chunk.textDelta);
         } else if (chunk.type === "tool-call") {
+          console.log(`[AgentRunner] tool-call session=${sessionId} tool=${chunk.toolName}`);
           this.emit("tool_call", sessionId, chunk.toolName, chunk.args);
         } else if (chunk.type === "tool-result") {
+          console.log(`[AgentRunner] tool-result session=${sessionId} tool=${chunk.toolName}`);
           this.emit("tool_result", sessionId, chunk.toolName, chunk.result);
+        } else if (chunk.type === "step-finish") {
+          console.log(`[AgentRunner] step-finish session=${sessionId} finishReason=${chunk.finishReason} text=${JSON.stringify(chunk.text?.slice(0, 60))}`);
+        } else if (chunk.type === "error") {
+          const errMsg = chunk.error instanceof Error ? chunk.error.message : String(chunk.error);
+          console.error(`[AgentRunner] stream error session=${sessionId}`, errMsg);
+          this.emit("error", sessionId, errMsg);
+          return;
         }
       }
 
-      const text = fullText;
+      if (!fullText) {
+        // Autonomous alert sessions (alert_X) legitimately produce no chat text —
+        // the agent's output is the tx push, not a message. Suppress cleanly.
+        // Chat sessions should always produce text per the system prompt; log a
+        // warning if they don't so we can catch regressions.
+        const isAutonomous = sessionId.startsWith("alert_");
+        if (isAutonomous) {
+          console.log(`[AgentRunner] autonomous session=${sessionId} completed (no chat text — tx push was the output)`);
+        } else {
+          console.warn(`[AgentRunner] session=${sessionId} produced empty text — check system prompt`);
+          this.emit("agent_done", sessionId, "");
+        }
+        return;
+      }
 
       // Persist agent response
       await sql`
         INSERT INTO messages (session_id, role, content)
-        VALUES (${sessionId}, ${"agent"}, ${text})
+        VALUES (${sessionId}, ${"agent"}, ${fullText})
       `;
 
-      console.log(`[AgentRunner] done session=${sessionId} chars=${text.length}`);
-      this.emit("agent_done", sessionId, text);
+      console.log(`[AgentRunner] done session=${sessionId} chars=${fullText.length}`);
+      this.emit("agent_done", sessionId, fullText);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[AgentRunner] error session=${sessionId}`, message);

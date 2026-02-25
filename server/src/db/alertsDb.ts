@@ -84,7 +84,7 @@ export async function cancelAlert(id: string): Promise<boolean> {
 // ---------------------------------------------------------------------------
 
 export async function createPendingTx(params: {
-  alert_id: string;
+  alert_id?: string;
   from_token: string;
   to_token: string;
   amount: number;
@@ -92,11 +92,12 @@ export async function createPendingTx(params: {
   expires_at: Date;
 }): Promise<PendingTxRow> {
   const tx_id = randomUUID();
+  const alert_id = params.alert_id ?? null;
   const [row] = await sql<PendingTxRow[]>`
     INSERT INTO pending_txs
       (tx_id, alert_id, from_token, to_token, amount, payload, expires_at)
     VALUES
-      (${tx_id}, ${params.alert_id}, ${params.from_token}, ${params.to_token},
+      (${tx_id}, ${alert_id}, ${params.from_token}, ${params.to_token},
        ${params.amount}, ${params.payload}, ${params.expires_at.toISOString()})
     RETURNING *
   `;

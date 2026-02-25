@@ -102,6 +102,7 @@ export const TxSigningRequestSchema = z.object({
     to_token: z.string(),
     amount: z.number(),
     serialized_tx: z.string(), // base64-encoded serialized transaction
+    reason: z.string(), // agent's one-line explanation shown to the user on mobile
     trigger: z.object({
       alert_id: z.number(),
       token: z.string(),

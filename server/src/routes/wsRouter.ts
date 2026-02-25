@@ -43,6 +43,7 @@ const wsRouter: FastifyPluginAsync = async (fastify) => {
               serialized_tx: tx.payload,
               // Trigger metadata — price details aren't stored on the tx row,
               // so we surface what we have. The client uses this for display only.
+              reason: "Pending signing request from a previous agent decision",
               trigger: {
                 alert_id: Number(tx.alert_id),
                 token: tx.from_token,

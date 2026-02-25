@@ -1,7 +1,8 @@
 import { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
-import { triggerAtPrice, mockPrices } from "../jobs/priceMonitor";
+import { triggerAtPrice, currentPrices } from "../jobs/priceMonitor";
 import {
+  createPendingTx,
   getTxById,
   getPendingTxs,
   refreshTx,
@@ -10,6 +11,7 @@ import {
 } from "../db/alertsDb";
 import { clientRegistry } from "../ws/clientRegistry";
 import { buildTestTransferTx } from "../solana/buildTx";
+import { sendPushToDevices } from "../notifications/expoPush";
 
 const API_KEY = process.env.API_KEY ?? "change_me";
 
@@ -56,7 +58,70 @@ const simulateRouter: FastifyPluginAsync = async (fastify) => {
       return reply.code(401).send({ error: "Unauthorized" });
     }
 
-    return reply.send({ prices: { ...mockPrices } });
+    return reply.send({ prices: { ...currentPrices } });
+  });
+
+  /**
+   * POST /simulate/push-tx
+   * Directly builds a real devnet tx, stores it, and pushes it to the mobile
+   * via WS + Expo push notification — no agent, no price alert needed.
+   * Use this to test the notification-open → signing flow in isolation.
+   */
+  fastify.post("/simulate/push-tx", async (req, reply) => {
+    if (req.headers["x-api-key"] !== API_KEY) {
+      return reply.code(401).send({ error: "Unauthorized" });
+    }
+
+    const serialized_tx = await buildTestTransferTx();
+    const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+
+    const tx = await createPendingTx({
+      from_token: "SOL",
+      to_token: "USDC",
+      amount: 0.01,
+      payload: serialized_tx,
+      expires_at: expiresAt,
+    });
+
+    const reason = "Test tx — tap to sign a 0.01 SOL transfer on devnet.";
+
+    const wsMsg = {
+      type: "tx_signing_request" as const,
+      payload: {
+        tx_id: tx.tx_id,
+        from_token: "SOL",
+        to_token: "USDC",
+        amount: 0.01,
+        serialized_tx,
+        reason,
+        trigger: {
+          alert_id: 0,
+          token: "SOL",
+          target_price: 0,
+          triggered_price: 0,
+          direction: "below" as const,
+        },
+        expires_at: expiresAt.toISOString(),
+      },
+    };
+
+    clientRegistry.broadcast(wsMsg);
+
+    await sendPushToDevices("agentX: Sign Transaction", reason, {
+      type: "tx_signing_request",
+      tx_id: tx.tx_id,
+    });
+
+    console.log(
+      `[simulate/push-tx] tx=${tx.tx_id} ws_clients=${clientRegistry.size}`
+    );
+
+    return reply.code(201).send({
+      ok: true,
+      tx_id: tx.tx_id,
+      ws_clients_notified: clientRegistry.size,
+      expires_at: expiresAt.toISOString(),
+    });
   });
 
   /**
@@ -100,6 +165,7 @@ const simulateRouter: FastifyPluginAsync = async (fastify) => {
           to_token: tx.to_token,
           amount: Number(tx.amount),
           serialized_tx: freshPayload,
+          reason: "Resent by simulate endpoint for testing",
           trigger: {
             alert_id: Number(tx.alert_id),
             token: tx.from_token,
