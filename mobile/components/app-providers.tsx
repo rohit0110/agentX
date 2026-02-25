@@ -5,6 +5,7 @@ import { AuthProvider } from '@/components/auth/auth-provider'
 import { ClusterProvider, useCluster } from '@/components/cluster/cluster-provider'
 import { AppTheme } from '@/components/app-theme'
 import { AgentProvider } from '@/components/agent/agent-provider'
+import { NotificationProvider } from '@/components/notifications/notification-provider'
 
 const queryClient = new QueryClient()
 
@@ -15,7 +16,10 @@ export function AppProviders({ children }: PropsWithChildren) {
         <ClusterProvider>
           <SolanaProvider>
             <AuthProvider>
-              <AgentProvider>{children}</AgentProvider>
+              <AgentProvider>
+              <NotificationProvider />
+              {children}
+            </AgentProvider>
             </AuthProvider>
           </SolanaProvider>
         </ClusterProvider>

@@ -1,50 +1,92 @@
-# Welcome to your Expo app 👋
+# agentX Mobile
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+React Native (Expo) mobile client for agentX. Connects to the agentX server via WebSocket and REST, handles wallet authentication via Mobile Wallet Adapter (MWA), and receives transaction signing requests from the AI agent.
 
-## Get started
+## Prerequisites
 
-1. Install dependencies
+- Android device or emulator with Google Play Services
+- [Android Studio](https://developer.android.com/studio) with an emulator configured, or a physical Android device
+- Node.js 22+
+- The agentX server running (see `../server/README.md`)
 
-   ```bash
-   npm install
-   ```
+## Setup
 
-2. Start the app
-
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
+### 1. Install dependencies
 
 ```bash
-npm run reset-project
+npm install
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+### 2. Configure the server connection
 
-## Learn more
+Edit `constants/agent-config.ts`:
 
-To learn more about developing your project with Expo, look at the following resources:
+```ts
+export const AgentConfig = {
+  apiUrl: 'http://<your-server-ip>:8080',  // 10.0.2.2 for Android emulator → host localhost
+  wsUrl:  'ws://<your-server-ip>:8080/ws',
+  apiKey: '<your API_KEY env var value>',
+}
+```
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+### 3. Prebuild and run
 
-## Join the community
+The app uses a custom dev client (not Expo Go) — a native build is required.
 
-Join our community of developers creating universal apps.
+```bash
+npx expo run:android
+```
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+If you change `app.json` (package name, plugins, etc.), do a clean prebuild first:
+
+```bash
+npx expo prebuild --clean && npx expo run:android
+```
+
+## Push Notifications Setup
+
+Push notifications use Expo's push service (relayed via FCM) to wake the app when a transaction signing request arrives while the app is closed.
+
+### One-time EAS setup
+
+```bash
+# Log in
+npx eas-cli login
+
+# Link project (writes projectId into app.json automatically)
+npx eas-cli init
+
+# Upload FCM V1 credentials
+npx eas-cli credentials
+# → Android → Google Service Account → upload the service account JSON
+#   (Firebase Console → Project Settings → Service Accounts → Generate new private key)
+```
+
+The app registers its Expo push token with the server at `POST /device/register` on every launch. No further configuration is needed.
+
+## Architecture
+
+```
+MobileWalletProvider (Solana devnet)
+  AuthProvider          — wallet connect/disconnect via MWA
+    AgentProvider       — WebSocket + REST, message state, tx signing flow
+      NotificationProvider — push token registration
+      <screens>
+```
+
+### Transaction signing flow
+
+1. Agent triggers a price alert on the server
+2. Server builds a Solana v0 transaction, stores it, and pushes `tx_signing_request` over WebSocket
+3. Server also sends an Expo push notification (for background/killed app)
+4. `AgentProvider` receives the WS message → `AgentTxModal` appears
+5. User taps **Sign & Send** → MWA opens the wallet for approval → signature returned to server
+6. On WS reconnect the server re-delivers any non-expired pending requests automatically
+
+## Package info
+
+| Field | Value |
+|---|---|
+| Package name | `com.agentx.app` |
+| EAS owner | `rohit0110` |
+| Cluster | Solana Devnet |
