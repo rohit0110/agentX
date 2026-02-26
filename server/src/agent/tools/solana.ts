@@ -1,60 +1,66 @@
 import { tool } from "ai";
 import { z } from "zod";
 import { currentPrices } from "../../jobs/priceMonitor";
-import { createAlert, createPendingTx, getPendingTxs } from "../../db/alertsDb";
+import { createAlert, createPendingTx, getPendingTxs, getWalletAddress } from "../../db/alertsDb";
 import { clientRegistry } from "../../ws/clientRegistry";
-import { buildTestTransferTx } from "../../solana/buildTx";
+import { buildJupiterSwapTx } from "../../solana/buildTx";
 import { sendPushToDevices } from "../../notifications/expoPush";
+
+// Only these two tokens are supported for swaps
+const SUPPORTED_TOKENS = ["SOL", "USDC"] as const;
+type SupportedToken = typeof SUPPORTED_TOKENS[number];
 
 // ---------------------------------------------------------------------------
 // getSolanaPrice
-// Reads from the shared mock price state that the price monitor ticks.
-// Phase 4: replace with real Helius/Jupiter price feed.
+// Reads from the shared price cache populated by the price monitor.
 // ---------------------------------------------------------------------------
 
 export const getSolanaPriceTool = tool({
   description:
-    "Get the current price of a Solana token in USD. Supported: SOL, USDC, JUP, BONK.",
+    "Get the current price of SOL or USDC in USD.",
   parameters: z.object({
-    tokenSymbol: z.string().describe("Token symbol, e.g. SOL, USDC, JUP, BONK"),
+    tokenSymbol: z.enum(["SOL", "USDC"]).describe("Token symbol: SOL or USDC"),
   }),
   execute: async ({ tokenSymbol }) => {
-    const symbol = tokenSymbol.toUpperCase();
-    const price = currentPrices[symbol];
-    console.log(`[tool:getSolanaPrice] ${symbol} = ${price}`);
+    const price = currentPrices[tokenSymbol];
+    console.log(`[tool:getSolanaPrice] ${tokenSymbol} = ${price}`);
     if (price === undefined) {
-      return { symbol, price: null, error: `Unknown token: ${symbol}` };
+      return { symbol: tokenSymbol, price: null, error: `No price data for: ${tokenSymbol}` };
     }
-    return { symbol, price, currency: "USD", source: "mock" };
+    return { symbol: tokenSymbol, price, currency: "USD" };
   },
 });
 
 // ---------------------------------------------------------------------------
 // createPriceAlert
 // User tells the agent "buy SOL when it drops below $150" → agent calls this.
-// The price monitor picks it up on the next tick.
+// Only SOL ↔ USDC swaps are supported.
 // ---------------------------------------------------------------------------
 
 export const createPriceAlertTool = tool({
   description:
-    "Register a price alert. When the token hits the target price the agent will be notified and can decide whether to queue a signing request. Use this when the user describes a trading strategy.",
+    "Register a price alert. When SOL hits the target price the agent will be notified and can decide whether to queue a signing request. Only SOL→USDC and USDC→SOL swaps are supported.",
   parameters: z.object({
-    token: z.string().describe("Token to watch: SOL, JUP, BONK"),
-    target_price: z.number().positive().describe("Price level that triggers the alert"),
+    token: z.literal("SOL").describe("Token to watch — only SOL is supported"),
+    target_price: z.number().positive().describe("SOL price level that triggers the alert"),
     direction: z
       .enum(["above", "below"])
-      .describe("Trigger when price goes above or below target"),
-    from_token: z.string().describe("Token to sell when the alert fires"),
-    to_token: z.string().describe("Token to buy when the alert fires"),
-    amount: z.number().positive().describe("Amount of from_token to trade"),
+      .describe("Trigger when SOL price goes above or below target"),
+    from_token: z.enum(["SOL", "USDC"]).describe("Token to sell when the alert fires"),
+    to_token:   z.enum(["SOL", "USDC"]).describe("Token to buy when the alert fires"),
+    amount: z.number().positive().describe("Amount of from_token to swap"),
   }),
   execute: async ({ token, target_price, direction, from_token, to_token, amount }) => {
+    if (from_token === to_token) {
+      return { success: false, error: "from_token and to_token must be different" };
+    }
+
     const alert = await createAlert({
       token: token.toUpperCase(),
       target_price,
       direction,
-      from_token: from_token.toUpperCase(),
-      to_token: to_token.toUpperCase(),
+      from_token,
+      to_token,
       amount,
     });
 
@@ -65,11 +71,11 @@ export const createPriceAlertTool = tool({
     return {
       success: true,
       alert_id: Number(alert.id),
-      token: token.toUpperCase(),
+      token,
       target_price,
       direction,
-      from_token: from_token.toUpperCase(),
-      to_token: to_token.toUpperCase(),
+      from_token,
+      to_token,
       amount,
     };
   },
@@ -77,18 +83,17 @@ export const createPriceAlertTool = tool({
 
 // ---------------------------------------------------------------------------
 // queueSigningRequest
-// The agent's primary action — builds a real Solana tx and pushes it to the
-// mobile app via WebSocket (+ Expo push for background).
-// The agent must provide a human-readable reason shown on the mobile UI.
+// Builds a real Jupiter swap transaction and pushes it to the mobile app.
+// Only SOL ↔ USDC swaps are supported.
 // ---------------------------------------------------------------------------
 
 export const queueSigningRequestTool = tool({
   description:
-    "Send a transaction signing request to the user's mobile app. Call this ONLY after you have analysed the market and decided a trade should happen. The user sees your reason on their phone and can approve or reject it with their wallet.",
+    "Send a transaction signing request to the user's mobile app. Call this ONLY after you have analysed the market and decided a trade should happen. Only SOL→USDC and USDC→SOL swaps are supported. The user sees your reason on their phone and can approve or reject it with their wallet.",
   parameters: z.object({
-    from_token: z.string().describe("Token to sell, e.g. SOL"),
-    to_token: z.string().describe("Token to buy, e.g. USDC"),
-    amount: z.number().positive().describe("Amount of from_token"),
+    from_token: z.enum(["SOL", "USDC"]).describe("Token to sell"),
+    to_token:   z.enum(["SOL", "USDC"]).describe("Token to buy"),
+    amount: z.number().positive().describe("Amount of from_token to swap"),
     reason: z
       .string()
       .describe(
@@ -96,12 +101,37 @@ export const queueSigningRequestTool = tool({
       ),
   }),
   execute: async ({ from_token, to_token, amount, reason }) => {
-    const serialized_tx = await buildTestTransferTx();
+    if (from_token === to_token) {
+      return { success: false, error: "from_token and to_token must be different" };
+    }
+
+    const walletAddress = await getWalletAddress();
+    if (!walletAddress) {
+      return {
+        success: false,
+        error: "No wallet address registered. The user must open the app and connect their wallet first.",
+      };
+    }
+
+    let serialized_tx: string;
+    try {
+      serialized_tx = await buildJupiterSwapTx({
+        fromToken: from_token,
+        toToken:   to_token,
+        amount,
+        userPublicKey: walletAddress,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[tool:queueSigningRequest] Jupiter build failed: ${msg}`);
+      return { success: false, error: `Failed to build swap transaction: ${msg}` };
+    }
+
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
 
     const tx = await createPendingTx({
-      from_token: from_token.toUpperCase(),
-      to_token: to_token.toUpperCase(),
+      from_token,
+      to_token,
       amount,
       payload: serialized_tx,
       expires_at: expiresAt,
@@ -111,14 +141,14 @@ export const queueSigningRequestTool = tool({
       type: "tx_signing_request" as const,
       payload: {
         tx_id: tx.tx_id,
-        from_token: from_token.toUpperCase(),
-        to_token: to_token.toUpperCase(),
+        from_token,
+        to_token,
         amount,
         serialized_tx,
         reason,
         trigger: {
           alert_id: 0,
-          token: from_token.toUpperCase(),
+          token: from_token,
           target_price: 0,
           triggered_price: 0,
           direction: "below" as const,
@@ -135,12 +165,12 @@ export const queueSigningRequestTool = tool({
     });
 
     console.log(
-      `[tool:queueSigningRequest] tx=${tx.tx_id} clients=${clientRegistry.size} reason="${reason}"`
+      `[tool:queueSigningRequest] tx=${tx.tx_id} ${from_token}→${to_token} ${amount} wallet=${walletAddress} clients=${clientRegistry.size}`
     );
 
     return {
+      success: true,
       tx_id: tx.tx_id,
-      status: "pushed_to_mobile",
       connected_clients: clientRegistry.size,
       message: `Signing request sent. The user will see: "${reason}"`,
     };

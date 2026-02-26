@@ -69,7 +69,7 @@ function isExpired(expires_at: string): boolean {
 }
 
 export function AgentProvider({ children }: PropsWithChildren) {
-  const { account, connect, signAndSendTransaction } = useMobileWallet()
+  const { signAndSendTransaction } = useMobileWallet()
 
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [toolActivity, setToolActivity] = useState<ToolActivity | null>(null)
@@ -234,9 +234,6 @@ export function AgentProvider({ children }: PropsWithChildren) {
     }
 
     try {
-      if (!account) {
-        await connect()
-      }
       const tx = VersionedTransaction.deserialize(Base64.toUint8Array(req.serialized_tx))
       const signature = await signAndSendTransaction(tx, 0)
       wsRef.current?.send(
@@ -250,7 +247,7 @@ export function AgentProvider({ children }: PropsWithChildren) {
     }
 
     setPending(null)
-  }, [account, connect, signAndSendTransaction])
+  }, [signAndSendTransaction])
 
   const rejectTx = useCallback((reason = 'user_declined') => {
     const req = pendingTxRef.current

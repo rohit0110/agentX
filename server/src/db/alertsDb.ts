@@ -166,15 +166,27 @@ export async function clearPendingTxs(): Promise<void> {
 // devices (Expo push tokens)
 // ---------------------------------------------------------------------------
 
-export async function registerDevice(push_token: string): Promise<void> {
+export async function registerDevice(push_token: string, wallet_address?: string): Promise<void> {
   await sql`
-    INSERT INTO devices (push_token)
-    VALUES (${push_token})
-    ON CONFLICT (push_token) DO NOTHING
+    INSERT INTO devices (push_token, wallet_address)
+    VALUES (${push_token}, ${wallet_address ?? null})
+    ON CONFLICT (push_token) DO UPDATE
+      SET wallet_address = COALESCE(EXCLUDED.wallet_address, devices.wallet_address)
   `;
 }
 
 export async function getDevicePushTokens(): Promise<string[]> {
   const rows = await sql<{ push_token: string }[]>`SELECT push_token FROM devices`;
   return rows.map((r) => r.push_token);
+}
+
+/** Returns the most recently registered wallet address, or null if none registered yet. */
+export async function getWalletAddress(): Promise<string | null> {
+  const [row] = await sql<{ wallet_address: string | null }[]>`
+    SELECT wallet_address FROM devices
+    WHERE wallet_address IS NOT NULL
+    ORDER BY id DESC
+    LIMIT 1
+  `;
+  return row?.wallet_address ?? null;
 }

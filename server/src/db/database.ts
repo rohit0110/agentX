@@ -66,10 +66,16 @@ export async function initDb(): Promise<void> {
   // Expo push tokens registered by mobile devices for background notifications
   await sql`
     CREATE TABLE IF NOT EXISTS devices (
-      id          BIGSERIAL PRIMARY KEY,
-      push_token  TEXT NOT NULL UNIQUE,
-      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      id             BIGSERIAL PRIMARY KEY,
+      push_token     TEXT NOT NULL UNIQUE,
+      wallet_address TEXT,
+      created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
+  `;
+
+  // Migration: add wallet_address to existing deployments
+  await sql`
+    ALTER TABLE devices ADD COLUMN IF NOT EXISTS wallet_address TEXT
   `;
 
   console.log("[db] Schema ready");

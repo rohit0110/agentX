@@ -10,15 +10,11 @@ import { agentRunner } from "../agent/AgentRunner";
 export const currentPrices: Record<string, number> = {
   SOL:  185.42,
   USDC: 1.0,
-  JUP:  1.23,
-  BONK: 0.000038,
 };
 
 const COINGECKO_IDS: Record<string, string> = {
   SOL:  "solana",
   USDC: "usd-coin",
-  JUP:  "jupiter-exchange-solana",
-  BONK: "bonk",
 };
 
 const COINGECKO_PRICE_API = `https://api.coingecko.com/api/v3/simple/price?ids=${Object.values(COINGECKO_IDS).join(",")}&vs_currencies=usd`;
@@ -60,7 +56,7 @@ async function fetchLivePrices(): Promise<void> {
   }
 
   console.log(
-    `[priceMonitor] Prices refreshed — SOL $${currentPrices.SOL?.toFixed(2)} | JUP $${currentPrices.JUP?.toFixed(4)} | BONK $${currentPrices.BONK?.toFixed(8)}`
+    `[priceMonitor] Prices refreshed — SOL $${currentPrices.SOL?.toFixed(2)} | USDC $${currentPrices.USDC?.toFixed(4)}`
   );
 }
 

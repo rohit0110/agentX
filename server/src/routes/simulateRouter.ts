@@ -8,9 +8,10 @@ import {
   refreshTx,
   resetTriggeredAlerts,
   clearPendingTxs,
+  getWalletAddress,
 } from "../db/alertsDb";
 import { clientRegistry } from "../ws/clientRegistry";
-import { buildTestTransferTx } from "../solana/buildTx";
+import { buildJupiterSwapTx } from "../solana/buildTx";
 import { sendPushToDevices } from "../notifications/expoPush";
 
 const API_KEY = process.env.API_KEY ?? "change_me";
@@ -72,18 +73,28 @@ const simulateRouter: FastifyPluginAsync = async (fastify) => {
       return reply.code(401).send({ error: "Unauthorized" });
     }
 
-    const serialized_tx = await buildTestTransferTx();
+    const walletAddress = await getWalletAddress();
+    if (!walletAddress) {
+      return reply.code(400).send({ error: "No wallet address registered. Open the app and connect your wallet first." });
+    }
+
+    const serialized_tx = await buildJupiterSwapTx({
+      fromToken: "SOL",
+      toToken:   "USDC",
+      amount:    0.01,
+      userPublicKey: walletAddress,
+    });
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
 
     const tx = await createPendingTx({
       from_token: "SOL",
-      to_token: "USDC",
-      amount: 0.01,
-      payload: serialized_tx,
+      to_token:   "USDC",
+      amount:     0.01,
+      payload:    serialized_tx,
       expires_at: expiresAt,
     });
 
-    const reason = "Test tx — tap to sign a 0.01 SOL transfer on devnet.";
+    const reason = "Test tx — tap to sign a 0.01 SOL → USDC swap on mainnet.";
 
     const wsMsg = {
       type: "tx_signing_request" as const,
@@ -149,11 +160,21 @@ const simulateRouter: FastifyPluginAsync = async (fastify) => {
 
     const resent: string[] = [];
 
+    const walletAddress = await getWalletAddress();
+    if (!walletAddress) {
+      return reply.code(400).send({ error: "No wallet address registered. Open the app and connect your wallet first." });
+    }
+
     for (const tx of txs) {
       if (!tx) continue;
 
-      // Rebuild with a fresh blockhash — old one is expired after ~90s
-      const freshPayload = await buildTestTransferTx();
+      // Rebuild with a fresh Jupiter quote + blockhash — old one expires after ~90s
+      const freshPayload = await buildJupiterSwapTx({
+        fromToken:     tx.from_token,
+        toToken:       tx.to_token,
+        amount:        Number(tx.amount),
+        userPublicKey: walletAddress,
+      });
       const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
       await refreshTx(tx.tx_id, freshPayload, expiresAt);
 

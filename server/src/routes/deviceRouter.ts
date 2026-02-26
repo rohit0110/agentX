@@ -6,7 +6,8 @@ import { registerDevice, getDevicePushTokens } from "../db/alertsDb";
 const API_KEY = process.env.API_KEY ?? "change_me";
 
 const RegisterBody = z.object({
-  push_token: z.string().min(1),
+  push_token:     z.string().min(1),
+  wallet_address: z.string().optional(),
 });
 
 const deviceRouter: FastifyPluginAsync = async (fastify) => {
@@ -25,13 +26,13 @@ const deviceRouter: FastifyPluginAsync = async (fastify) => {
       return reply.code(400).send({ error: parsed.error.flatten() });
     }
 
-    const { push_token } = parsed.data;
+    const { push_token, wallet_address } = parsed.data;
 
     if (!Expo.isExpoPushToken(push_token)) {
       return reply.code(400).send({ error: "Invalid Expo push token format" });
     }
 
-    await registerDevice(push_token);
+    await registerDevice(push_token, wallet_address);
     return reply.code(201).send({ ok: true });
   });
 

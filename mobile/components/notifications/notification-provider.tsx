@@ -1,8 +1,9 @@
 import * as Notifications from 'expo-notifications'
 import Constants from 'expo-constants'
-import { useEffect } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Platform } from 'react-native'
 import { AgentConfig } from '@/constants/agent-config'
+import { useMobileWallet } from '@wallet-ui/react-native-web3js'
 
 // Suppress the notification banner when the app is in the foreground —
 // the WS message already shows the signing modal directly.
@@ -52,18 +53,21 @@ async function registerForPushNotifications(): Promise<string | null> {
   }
 }
 
-async function registerTokenWithServer(token: string): Promise<void> {
+async function registerTokenWithServer(token: string, walletAddress?: string): Promise<void> {
   try {
+    const body: Record<string, string> = { push_token: token }
+    if (walletAddress) body.wallet_address = walletAddress
+
     const res = await fetch(`${AgentConfig.apiUrl}/device/register`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-Api-Key': AgentConfig.apiKey,
       },
-      body: JSON.stringify({ push_token: token }),
+      body: JSON.stringify(body),
     })
     if (res.ok) {
-      console.log('[notifications] Push token registered with server:', token)
+      console.log('[notifications] Registered with server — token:', token, 'wallet:', walletAddress ?? 'none')
     } else {
       console.warn('[notifications] Server rejected token registration:', res.status)
     }
@@ -73,21 +77,38 @@ async function registerTokenWithServer(token: string): Promise<void> {
 }
 
 export function NotificationProvider() {
+  const { account } = useMobileWallet()
+  const [pushToken, setPushToken] = useState<string | null>(null)
+  // Track the last wallet address we registered with to avoid redundant calls
+  const registeredWalletRef = useRef<string | null>(null)
+
+  // Obtain push token on mount and do an initial registration
   useEffect(() => {
     registerForPushNotifications().then((token) => {
-      if (token) registerTokenWithServer(token)
+      if (!token) return
+      setPushToken(token)
+      const walletAddress = account?.address?.toString()
+      registeredWalletRef.current = walletAddress ?? null
+      registerTokenWithServer(token, walletAddress)
     })
 
-    // When the user taps a notification and the app opens from background/killed,
-    // the WS reconnects automatically. The server re-delivers any pending
-    // tx_signing_request on reconnect, which shows the signing modal automatically.
     const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
       const data = response.notification.request.content.data
       console.log('[notifications] Notification tapped, type:', data?.type, 'tx_id:', data?.tx_id)
     })
 
     return () => subscription.remove()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Re-register when the wallet connects or changes, so the server always has the latest address
+  useEffect(() => {
+    if (!pushToken) return
+    const walletAddress = account?.address?.toString() ?? null
+    if (walletAddress === registeredWalletRef.current) return
+    registeredWalletRef.current = walletAddress
+    registerTokenWithServer(pushToken, walletAddress ?? undefined)
+  }, [account, pushToken])
 
   return null
 }

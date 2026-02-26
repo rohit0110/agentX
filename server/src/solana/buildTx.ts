@@ -1,77 +1,77 @@
-import {
-  createSolanaRpc,
-  address,
-  pipe,
-  createTransactionMessage,
-  setTransactionMessageFeePayer,
-  setTransactionMessageLifetimeUsingBlockhash,
-  appendTransactionMessageInstruction,
-  compileTransaction,
-  getBase64EncodedWireTransaction,
-  AccountRole,
-  type Address,
-} from "@solana/kit";
+// Mainnet token mint addresses
+export const SOL_MINT  = "So11111111111111111111111111111111111111112";
+export const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
-const RPC_URL = process.env.SOLANA_RPC_URL ?? "https://api.devnet.solana.com";
+const TOKEN_DECIMALS: Record<string, number> = {
+  SOL:  9,
+  USDC: 6,
+};
 
-export const rpc = createSolanaRpc(RPC_URL);
+export function mintForToken(token: string): string {
+  switch (token.toUpperCase()) {
+    case "SOL":  return SOL_MINT;
+    case "USDC": return USDC_MINT;
+    default: throw new Error(`Unsupported token: ${token}. Only SOL and USDC are supported.`);
+  }
+}
 
-// Hardcoded for the test phase — Phase 4 will take these from the alert + wallet
-const SENDER    = address("2veHWtQJQMVz5c488d7ihMyvFV29JFYGs7tTHZJ8sMX2");
-const RECIPIENT = address("7WKaHxMy54Mn5JPpETqiwwkcyJLmkcsrjwfvUnDqPpdN");
-const AMOUNT    = 10_000_000n; // 0.01 SOL in lamports
-
-const SYSTEM_PROGRAM = address("11111111111111111111111111111111");
-
-/**
- * Build a System Program Transfer instruction from kit primitives.
- * Wire layout: [u32 LE: instruction index 2] [u64 LE: lamports]
- *
- * Avoids @solana-program/system which has a type-generation version mismatch
- * with the current @solana/kit release.
- */
-function buildTransferInstruction(from: Address, to: Address, lamports: bigint) {
-  const data = new Uint8Array(12);
-  const view = new DataView(data.buffer);
-  view.setUint32(0, 2, true);          // Transfer = instruction index 2
-  view.setBigUint64(4, lamports, true); // amount
-
-  return {
-    programAddress: SYSTEM_PROGRAM,
-    accounts: [
-      { address: from, role: AccountRole.WRITABLE_SIGNER },
-      { address: to,   role: AccountRole.WRITABLE },
-    ],
-    data,
-  };
+function toSmallestUnit(amount: number, token: string): number {
+  const decimals = TOKEN_DECIMALS[token.toUpperCase()];
+  if (decimals === undefined) throw new Error(`Unknown token: ${token}`);
+  return Math.round(amount * Math.pow(10, decimals));
 }
 
 /**
- * Builds an unsigned v0 VersionedTransaction transferring 0.01 SOL on devnet.
+ * Build a Jupiter swap transaction for SOL ↔ USDC on mainnet.
  *
- * The signature slot for the fee payer is zero-filled — MWA on the mobile
- * side deserializes, signs with the user's key, then broadcasts.
- *
- * Returns: base64-encoded Solana wire-format transaction
+ * Calls the Jupiter v6 Quote API then the Swap API. Jupiter returns a
+ * base64-encoded VersionedTransaction that is already structured for the
+ * user's wallet — MWA on the mobile side deserializes, signs, then broadcasts.
  */
-export async function buildTestTransferTx(): Promise<string> {
-  const { value: latestBlockhash } = await rpc.getLatestBlockhash().send();
+export async function buildJupiterSwapTx(params: {
+  fromToken: string;   // "SOL" or "USDC"
+  toToken:   string;   // "SOL" or "USDC"
+  amount:    number;   // human-readable (e.g. 0.1 for 0.1 SOL)
+  userPublicKey: string; // base58 wallet address — required by Jupiter
+}): Promise<string> {
+  const { fromToken, toToken, amount, userPublicKey } = params;
 
-  const transactionMessage = pipe(
-    createTransactionMessage({ version: 0 }),
-    (tx) => setTransactionMessageFeePayer(SENDER, tx),
-    (tx) => setTransactionMessageLifetimeUsingBlockhash(latestBlockhash, tx),
-    (tx) =>
-      appendTransactionMessageInstruction(
-        buildTransferInstruction(SENDER, RECIPIENT, AMOUNT),
-        tx
-      )
-  );
+  const inputMint      = mintForToken(fromToken);
+  const outputMint     = mintForToken(toToken);
+  const amountSmallest = toSmallestUnit(amount, fromToken);
 
-  const compiledTx = compileTransaction(transactionMessage);
+  // 1. Quote
+  const quoteUrl = new URL("https://lite-api.jup.ag/swap/v1/quote");
+  quoteUrl.searchParams.set("inputMint",   inputMint);
+  quoteUrl.searchParams.set("outputMint",  outputMint);
+  quoteUrl.searchParams.set("amount",      String(amountSmallest));
+  quoteUrl.searchParams.set("slippageBps", "50"); // 0.5% slippage
 
-  // getBase64EncodedWireTransaction is typed for FullySignedTransaction but
-  // the wire encoding is identical for unsigned txs: zero-filled sig slots.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return getBase64EncodedWireTransaction(compiledTx as any);
+  const quoteRes = await fetch(quoteUrl.toString());
+  if (!quoteRes.ok) {
+    const body = await quoteRes.text();
+    throw new Error(`Jupiter quote failed (${quoteRes.status}): ${body}`);
+  }
+  const quoteResponse = await quoteRes.json();
+
+  // 2. Swap transaction
+  const swapRes = await fetch("https://lite-api.jup.ag/swap/v1/swap", {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify({
+      quoteResponse,
+      userPublicKey,
+      wrapAndUnwrapSol:          true,  // auto-wrap SOL → wSOL and unwrap wSOL → SOL
+      dynamicComputeUnitLimit:   true,
+      prioritizationFeeLamports: "auto",
+    }),
+  });
+
+  if (!swapRes.ok) {
+    const body = await swapRes.text();
+    throw new Error(`Jupiter swap tx build failed (${swapRes.status}): ${body}`);
+  }
+
+  const { swapTransaction } = (await swapRes.json()) as { swapTransaction: string };
+  return swapTransaction; // base64-encoded VersionedTransaction ready for signing
 }
