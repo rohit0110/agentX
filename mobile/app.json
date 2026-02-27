@@ -18,6 +18,7 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
+      "softwareKeyboardLayoutMode": "pan",
       "package": "com.agentx.app",
       "googleServicesFile": "./google-services.json"
     },

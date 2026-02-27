@@ -67,7 +67,7 @@ The app registers its Expo push token with the server at `POST /device/register`
 ## Architecture
 
 ```
-MobileWalletProvider (Solana devnet)
+MobileWalletProvider (Solana Mainnet)
   AuthProvider          — wallet connect/disconnect via MWA
     AgentProvider       — WebSocket + REST, message state, tx signing flow
       NotificationProvider — push token registration
@@ -76,11 +76,11 @@ MobileWalletProvider (Solana devnet)
 
 ### Transaction signing flow
 
-1. Agent triggers a price alert on the server
-2. Server builds a Solana v0 transaction, stores it, and pushes `tx_signing_request` over WebSocket
+1. Agent triggers a price alert on the server (or calls `queueSigningRequest` directly)
+2. Server builds a real Jupiter mainnet v0 transaction, stores it, and pushes a `tx_signing_request` WS message to all connected clients
 3. Server also sends an Expo push notification (for background/killed app)
-4. `AgentProvider` receives the WS message → `AgentTxModal` appears
-5. User taps **Sign & Send** → MWA opens the wallet for approval → signature returned to server
+4. `AgentProvider` receives the `tx_signing_request` WS message → `AgentTxModal` appears
+5. User taps **Sign & Send** → MWA opens the wallet for approval → signature returned to server via `tx_signed` WS message
 6. On WS reconnect the server re-delivers any non-expired pending requests automatically
 
 ## Package info
@@ -89,4 +89,4 @@ MobileWalletProvider (Solana devnet)
 |---|---|
 | Package name | `com.agentx.app` |
 | EAS owner | `rohit0110` |
-| Cluster | Solana Devnet |
+| Cluster | Solana Mainnet |

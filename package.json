@@ -1,7 +1,7 @@
 {
   "name": "agentx",
   "private": true,
-  "workspaces": ["server"],
+  "workspaces": ["server", "packages/*"],
   "scripts": {
     "dev": "npm run dev --workspace=server"
   }
