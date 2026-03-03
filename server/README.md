@@ -12,10 +12,14 @@ Client (REST / WS)
        ▼
   Fastify (HTTP + WS)
        │
-       ├── GET  /health        (no auth)
-       ├── POST /agent/prompt  (X-Api-Key)
-       ├── GET  /agent/history (X-Api-Key)
-       └── WS   /ws            (X-Api-Key)
+       ├── GET    /health                (no auth)
+       ├── POST   /agent/prompt          (X-Api-Key)
+       ├── GET    /agent/history         (X-Api-Key)
+       ├── POST   /orders/alert          (X-Api-Key)
+       ├── GET    /orders/alerts         (X-Api-Key)
+       ├── DELETE /orders/alerts/:id     (X-Api-Key)
+       ├── POST   /device/register       (X-Api-Key)
+       └── WS     /ws                    (X-Api-Key)
                 │
                 ▼
          AgentRunner (EventEmitter)
@@ -24,15 +28,19 @@ Client (REST / WS)
                 ▼
         Claude (claude-sonnet-4-6)
                 │
-        ┌───────┴────────┐
-        ▼                ▼
-  filesystem tools   solana tools
-  (readFile,         (getSolanaPrice,
-   writeFile)         buildMockSwapTx)
+        ┌───────┴───────────────────┐
+        ▼                           ▼
+  getSolanaPrice           createPriceAlert
+  queueSigningRequest      getPendingSigningRequests
                 │
-                ▼
-          PostgreSQL
-     (sessions, messages)
+       ┌────────┼────────────┐
+       ▼        ▼            ▼
+  Jupiter    Expo Push   PostgreSQL
+  (mainnet    (FCM via   (sessions,
+   swaps)      Expo)      alerts, txs)
+                │
+       Price Monitor (60s CoinGecko poll)
+       → checkAlerts() → queueSigningRequest
 ```
 
 ---
@@ -139,11 +147,6 @@ Content-Type: application/json
 
 Returns all messages across all sessions, ordered oldest-first. Useful for hydrating a chat UI on app launch.
 
-**Headers:**
-```
-X-Api-Key: <key>
-```
-
 **Response `200`:**
 ```json
 {
@@ -176,6 +179,163 @@ X-Api-Key: <key>
 
 ---
 
+#### `POST /orders/alert`
+
+Create a price alert. When the SOL price crosses the target, the server automatically builds a Jupiter swap transaction and pushes a `tx_signing_request` to connected mobile clients.
+
+**Request body:**
+```json
+{
+  "token": "SOL",
+  "target_price": 150.00,
+  "direction": "below",
+  "from_token": "SOL",
+  "to_token": "USDC",
+  "amount": 1.0
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `token` | string | Token to watch — currently only `SOL` is supported |
+| `target_price` | number | Price level that triggers the alert |
+| `direction` | `"above"` \| `"below"` | Fire when price goes above or below target |
+| `from_token` | `"SOL"` \| `"USDC"` | Token to sell when alert fires |
+| `to_token` | `"SOL"` \| `"USDC"` | Token to buy when alert fires |
+| `amount` | number | Amount of `from_token` to swap |
+
+**Response `201`:**
+```json
+{
+  "alert_id": 3,
+  "token": "SOL",
+  "target_price": 150.00,
+  "direction": "below",
+  "from_token": "SOL",
+  "to_token": "USDC",
+  "amount": 1.0,
+  "status": "active",
+  "created_at": "2026-02-27T10:00:00.000Z"
+}
+```
+
+---
+
+#### `GET /orders/alerts`
+
+List price alerts. Optionally filter by status.
+
+**Query params:** `?status=active` (optional — values: `active`, `triggered`, `cancelled`)
+
+**Response `200`:**
+```json
+[
+  {
+    "alert_id": 3,
+    "token": "SOL",
+    "target_price": 150.00,
+    "direction": "below",
+    "from_token": "SOL",
+    "to_token": "USDC",
+    "amount": 1.0,
+    "status": "active",
+    "created_at": "2026-02-27T10:00:00.000Z"
+  }
+]
+```
+
+---
+
+#### `DELETE /orders/alerts/:id`
+
+Cancel an active alert.
+
+**Response `200`:** `{ "ok": true, "alert_id": 3 }`
+
+**Response `404`:** `{ "error": "Alert not found or already inactive" }`
+
+---
+
+#### `POST /device/register`
+
+Register a mobile device's Expo push token. Call this on every app launch. Also accepts an optional wallet address (used by the server when building swap transactions).
+
+**Request body:**
+```json
+{
+  "push_token": "ExponentPushToken[xxxxxx]",
+  "wallet_address": "So11111111111111111111111111111111111111112"
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `push_token` | string | Expo push token from `expo-notifications` |
+| `wallet_address` | string | Optional. Solana wallet public key for building Jupiter swap txs |
+
+**Response `201`:** `{ "ok": true }`
+
+---
+
+#### `POST /simulate/price-trigger` *(testing only)*
+
+Instantly set a mock token price and run `checkAlerts()`. Use this during development to trigger the alert → swap → signing flow without waiting for the real price monitor.
+
+**Request body:**
+```json
+{ "token": "SOL", "price": 140 }
+```
+
+**Response `200`:**
+```json
+{
+  "ok": true,
+  "token": "SOL",
+  "simulated_price": 140,
+  "message": "Mock price for SOL set to 140; active alerts evaluated."
+}
+```
+
+---
+
+#### `GET /simulate/prices` *(testing only)*
+
+Return the current prices held in the price monitor cache.
+
+**Response `200`:** `{ "prices": { "SOL": 185.42, "USDC": 1.0 } }`
+
+---
+
+#### `POST /simulate/push-tx` *(testing only)*
+
+Directly build a real Jupiter swap tx (0.01 SOL → USDC) and push it to all connected WS clients + Expo push, bypassing the agent and alert system entirely. Use this to test the notification → signing flow in isolation.
+
+**Response `201`:**
+```json
+{
+  "ok": true,
+  "tx_id": "2e31b14f-1a42-4e91-8ffc-216e3f16c70d",
+  "ws_clients_notified": 1,
+  "expires_at": "2026-02-27T10:05:00.000Z"
+}
+```
+
+---
+
+#### `POST /simulate/resend-tx` *(testing only)*
+
+Rebuild a pending tx with a fresh Jupiter quote and re-push it. Solana transactions expire after ~90 seconds — use this when you need to re-present a signing request after it expired.
+
+**Request body:** `{ "tx_id": "..." }` (omit to resend all pending txs)
+
+---
+
+#### `POST /simulate/reset` *(testing only)*
+
+Reset test state: flips triggered alerts back to `active` and deletes pending txs. Run between test cycles instead of restarting.
+
+---
+
 ### WebSocket — `GET /ws`
 
 Connect with the `X-Api-Key` header. All agent activity for all sessions streams to every connected client.
@@ -187,6 +347,8 @@ Headers: X-Api-Key: <key>
 ```
 
 If auth fails, the socket is closed immediately with code `1008 Policy Violation`.
+
+On reconnect, the server re-delivers any non-expired pending signing requests automatically.
 
 ---
 
@@ -202,7 +364,7 @@ All messages are JSON text frames.
 {
   "type": "prompt",
   "payload": {
-    "prompt": "Build me a SOL to USDC swap for 1 SOL",
+    "prompt": "Buy SOL when it drops below $150",
     "session_id": "optional-uuid"
   }
 }
@@ -212,9 +374,45 @@ All messages are JSON text frames.
 |---|---|---|---|
 | `type` | `"prompt"` | Yes | Message type |
 | `payload.prompt` | string | Yes | The user's message to the agent |
-| `payload.session_id` | string | No | Continue an existing session (conversation memory). Omit for a new conversation. |
+| `payload.session_id` | string | No | Continue an existing session. Omit for a new conversation. |
 
-The agent begins processing immediately. Streaming output arrives as `agent_delta` → `agent_done` frames.
+---
+
+##### `tx_signed` — transaction was approved and sent by the wallet
+
+```json
+{
+  "type": "tx_signed",
+  "payload": {
+    "tx_id": "2e31b14f-1a42-4e91-8ffc-216e3f16c70d",
+    "signature": "5Uf8X..."
+  }
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `tx_id` | string | The `tx_id` from the signing request |
+| `signature` | string | Base58-encoded Solana transaction signature |
+
+---
+
+##### `tx_rejected` — user declined the signing request
+
+```json
+{
+  "type": "tx_rejected",
+  "payload": {
+    "tx_id": "2e31b14f-1a42-4e91-8ffc-216e3f16c70d",
+    "reason": "User dismissed"
+  }
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `tx_id` | string | The `tx_id` from the signing request |
+| `reason` | string | Optional. Human-readable rejection reason. |
 
 ---
 
@@ -224,7 +422,7 @@ The agent begins processing immediately. Streaming output arrives as `agent_delt
 { "type": "ping" }
 ```
 
-Server replies with `{ "type": "pong" }`. Use this to keep the connection alive and detect disconnects.
+Server replies with `{ "type": "pong" }`.
 
 ---
 
@@ -236,51 +434,39 @@ All messages are JSON text frames.
 
 ##### `agent_delta` — streaming token
 
-Fired for each text token as Claude generates its response. Concatenate these in order to build the full response progressively.
+Fired for each text token as Claude generates its response. Concatenate these to show a live typing effect.
 
 ```json
 {
   "type": "agent_delta",
   "payload": {
     "session_id": "4df6ab7a-b99b-4d95-8dd5-deef11d0aaeb",
-    "text": "Here's your swap summary"
+    "text": "Setting up your price alert..."
   }
 }
 ```
-
-| Field | Type | Description |
-|---|---|---|
-| `session_id` | string | Which conversation this belongs to |
-| `text` | string | A token or short fragment of the response |
 
 ---
 
 ##### `agent_done` — response complete
 
-Fired once when Claude has finished generating. Contains the full assembled response text (same content as all `agent_delta` frames concatenated).
+Fired once when Claude finishes generating. Contains the full assembled response (identical to all `agent_delta` frames concatenated).
 
 ```json
 {
   "type": "agent_done",
   "payload": {
     "session_id": "4df6ab7a-b99b-4d95-8dd5-deef11d0aaeb",
-    "text": "Here's your swap summary:\n\n| Detail | Value |\n|---|---|\n| **From** | 1 SOL |..."
+    "text": "Done! I've set a price alert: I'll queue a swap of 1 SOL → USDC when SOL drops below $150."
   }
 }
 ```
 
-| Field | Type | Description |
-|---|---|---|
-| `session_id` | string | Which conversation this belongs to |
-| `text` | string | Full response text. May contain markdown. |
-
-> The mobile app should use `agent_delta` frames to show a live typing effect, then replace with the `agent_done` text once complete.
+> Use `agent_delta` frames for the live typing effect, then replace with `agent_done` text as the authoritative final response.
 
 ---
 
 ##### `tool_call` — agent is calling a tool
-
-Fired when Claude decides to invoke a tool. Useful for showing "thinking…" or tool-specific UI states in the app.
 
 ```json
 {
@@ -293,17 +479,9 @@ Fired when Claude decides to invoke a tool. Useful for showing "thinking…" or 
 }
 ```
 
-| Field | Type | Description |
-|---|---|---|
-| `session_id` | string | Which conversation this belongs to |
-| `tool` | string | Tool name (see Tool Reference below) |
-| `input` | object | Arguments passed to the tool |
-
 ---
 
 ##### `tool_result` — tool returned a value
-
-Fired immediately after a tool finishes executing. Contains the full tool output.
 
 ```json
 {
@@ -311,27 +489,57 @@ Fired immediately after a tool finishes executing. Contains the full tool output
   "payload": {
     "session_id": "4df6ab7a-b99b-4d95-8dd5-deef11d0aaeb",
     "tool": "getSolanaPrice",
-    "output": {
-      "symbol": "SOL",
-      "price": 185.42,
-      "currency": "USD",
-      "source": "mock"
-    }
+    "output": { "symbol": "SOL", "price": 185.42, "currency": "USD" }
+  }
+}
+```
+
+---
+
+##### `tx_signing_request` — agent has queued a swap for the user to sign
+
+Pushed to all connected clients whenever the agent calls `queueSigningRequest` or a price alert fires. The mobile app should surface this as a confirmation modal.
+
+```json
+{
+  "type": "tx_signing_request",
+  "payload": {
+    "tx_id": "2e31b14f-1a42-4e91-8ffc-216e3f16c70d",
+    "from_token": "SOL",
+    "to_token": "USDC",
+    "amount": 1.0,
+    "serialized_tx": "<base64-encoded Jupiter v0 transaction>",
+    "reason": "SOL dropped to $142 — executing your buy-the-dip strategy targeting $150 recovery.",
+    "trigger": {
+      "alert_id": 3,
+      "token": "SOL",
+      "target_price": 150.00,
+      "triggered_price": 142.10,
+      "direction": "below"
+    },
+    "expires_at": "2026-02-27T10:05:00.000Z"
   }
 }
 ```
 
 | Field | Type | Description |
 |---|---|---|
-| `session_id` | string | Which conversation this belongs to |
-| `tool` | string | Tool name |
-| `output` | object | Tool return value (shape varies by tool — see Tool Reference) |
+| `tx_id` | string (UUID) | Unique ID for this signing request |
+| `from_token` | string | Token being sold (`"SOL"` or `"USDC"`) |
+| `to_token` | string | Token being bought |
+| `amount` | number | Amount of `from_token` |
+| `serialized_tx` | string (base64) | Serialized Jupiter v0 transaction. Pass directly to MWA `signAndSendTransaction`. |
+| `reason` | string | Agent's one-line explanation shown to the user |
+| `trigger.alert_id` | number | Alert that triggered this (0 if agent-initiated directly) |
+| `trigger.token` | string | Token that was watched |
+| `trigger.target_price` | number | Price level from the alert |
+| `trigger.triggered_price` | number | Actual price when the alert fired |
+| `trigger.direction` | `"above"` \| `"below"` | Alert direction |
+| `expires_at` | ISO 8601 string | Client should refuse to sign after this time |
 
 ---
 
 ##### `error` — agent or server error
-
-Fired if the agent encounters an unrecoverable error for a session.
 
 ```json
 {
@@ -353,45 +561,48 @@ Fired if the agent encounters an unrecoverable error for a session.
 
 ---
 
-#### Full WS Flow Example — Swap Request
+#### Full WS Flow Example — Agent-Initiated Swap
 
 ```
-→ { "type": "prompt", "payload": { "prompt": "Build me a SOL to USDC swap for 1 SOL" } }
+→ { "type": "prompt", "payload": { "prompt": "SOL looks cheap. Swap 0.5 SOL to USDC." } }
 
-← { "type": "agent_delta",  "payload": { "session_id": "...", "text": "Sure! Let me fetch" } }
-← { "type": "agent_delta",  "payload": { "session_id": "...", "text": " the current SOL price..." } }
+← { "type": "agent_delta",  "payload": { "session_id": "...", "text": "Let me check the price first..." } }
 
-← { "type": "tool_call",    "payload": { "session_id": "...", "tool": "getSolanaPrice",   "input":  { "tokenSymbol": "SOL" } } }
-← { "type": "tool_result",  "payload": { "session_id": "...", "tool": "getSolanaPrice",   "output": { "symbol": "SOL", "price": 185.42, "currency": "USD", "source": "mock" } } }
+← { "type": "tool_call",   "payload": { "session_id": "...", "tool": "getSolanaPrice", "input": { "tokenSymbol": "SOL" } } }
+← { "type": "tool_result", "payload": { "session_id": "...", "tool": "getSolanaPrice", "output": { "symbol": "SOL", "price": 142.10, "currency": "USD" } } }
 
-← { "type": "tool_call",    "payload": { "session_id": "...", "tool": "getSolanaPrice",   "input":  { "tokenSymbol": "USDC" } } }
-← { "type": "tool_result",  "payload": { "session_id": "...", "tool": "getSolanaPrice",   "output": { "symbol": "USDC", "price": 1, "currency": "USD", "source": "mock" } } }
+← { "type": "tool_call",   "payload": { "session_id": "...", "tool": "queueSigningRequest",
+     "input": { "from_token": "SOL", "to_token": "USDC", "amount": 0.5,
+                "reason": "SOL is at $142 — below your target. Swapping 0.5 SOL to USDC to lock in." } } }
+← { "type": "tool_result", "payload": { "session_id": "...", "tool": "queueSigningRequest",
+     "output": { "success": true, "tx_id": "2e31b14f-...", "connected_clients": 1,
+                 "message": "Signing request sent. The user will see: \"SOL is at $142...\"" } } }
 
-← { "type": "tool_call",    "payload": { "session_id": "...", "tool": "buildMockSwapTx", "input":  { "fromToken": "SOL", "toToken": "USDC", "amount": 1, "description": "Swap 1 SOL to USDC" } } }
-← { "type": "tool_result",  "payload": { "session_id": "...", "tool": "buildMockSwapTx", "output": {
-    "txId": "2e31b14f-1a42-4e91-8ffc-216e3f16c70d",
-    "fromToken": "SOL",
-    "toToken": "USDC",
-    "amount": 1,
-    "description": "Swap 1 SOL to USDC",
-    "payload": "<base64-encoded-transaction>",
-    "status": "pending_signature"
-  } } }
+← { "type": "tx_signing_request", "payload": {
+      "tx_id": "2e31b14f-1a42-4e91-8ffc-216e3f16c70d",
+      "from_token": "SOL", "to_token": "USDC", "amount": 0.5,
+      "serialized_tx": "<base64 Jupiter v0 tx>",
+      "reason": "SOL is at $142 — below your target. Swapping 0.5 SOL to USDC to lock in.",
+      "trigger": { "alert_id": 0, "token": "SOL", "target_price": 0, "triggered_price": 0, "direction": "below" },
+      "expires_at": "2026-02-27T10:05:00.000Z"
+   } }
 
-← { "type": "agent_delta",  "payload": { "session_id": "...", "text": "Here's your swap summary..." } }
-← { "type": "agent_delta",  "payload": { "session_id": "...", "text": "..." } }
-← { "type": "agent_done",   "payload": { "session_id": "...", "text": "<full response>" } }
+← { "type": "agent_done", "payload": { "session_id": "...", "text": "Done! I've sent a signing request to your phone. SOL → USDC swap for 0.5 SOL. Approve it in the app." } }
+
+  [user approves in mobile app via MWA]
+
+→ { "type": "tx_signed", "payload": { "tx_id": "2e31b14f-...", "signature": "5Uf8X..." } }
 ```
 
 ---
 
 ## Tool Reference
 
-These are the tools available to the agent in Phase 1. All are mocked — no real network calls are made.
+These are the tools available to the agent. All use live mainnet data via the Jupiter API and price monitor cache.
 
 ### `getSolanaPrice`
 
-Returns the current price of a Solana token in USD.
+Returns the current price of SOL or USDC from the price monitor cache (polled every 60 seconds from CoinGecko; falls back to last known value if rate-limited).
 
 **Input:**
 ```json
@@ -400,104 +611,100 @@ Returns the current price of a Solana token in USD.
 
 | Field | Type | Description |
 |---|---|---|
-| `tokenSymbol` | string | Token symbol. Supported: `SOL`, `USDC`, `JUP`, `BONK` |
+| `tokenSymbol` | `"SOL"` \| `"USDC"` | Token to query |
 
 **Output:**
 ```json
-{
-  "symbol": "SOL",
-  "price": 185.42,
-  "currency": "USD",
-  "source": "mock"
-}
+{ "symbol": "SOL", "price": 185.42, "currency": "USD" }
 ```
-
-| Field | Type | Description |
-|---|---|---|
-| `symbol` | string | Uppercased token symbol |
-| `price` | number \| null | Price in USD. `null` if token unknown. |
-| `currency` | string | Always `"USD"` |
-| `source` | string | `"mock"` in Phase 1, will be `"helius"` in Phase 4 |
-
-**Hardcoded Phase 1 prices:**
-| Token | Price |
-|---|---|
-| SOL | $185.42 |
-| USDC | $1.00 |
-| JUP | $1.23 |
-| BONK | $0.000038 |
 
 ---
 
-### `buildMockSwapTx`
+### `createPriceAlert`
 
-Builds a mock Solana swap transaction. Returns a fake base64-encoded transaction payload ready for signing.
+Register a price alert. When SOL crosses the target price, the server automatically builds a Jupiter swap transaction and pushes a `tx_signing_request` to the mobile app.
 
 **Input:**
 ```json
 {
-  "fromToken": "SOL",
-  "toToken": "USDC",
-  "amount": 1,
-  "description": "Swap 1 SOL to USDC"
+  "token": "SOL",
+  "target_price": 150.0,
+  "direction": "below",
+  "from_token": "SOL",
+  "to_token": "USDC",
+  "amount": 1.0
 }
 ```
 
 | Field | Type | Description |
 |---|---|---|
-| `fromToken` | string | Source token symbol |
-| `toToken` | string | Destination token symbol |
-| `amount` | number | Amount of `fromToken` to swap (must be > 0) |
-| `description` | string | Human-readable label for this trade |
+| `token` | `"SOL"` | Token to watch (only SOL currently) |
+| `target_price` | number | Price level that triggers the alert |
+| `direction` | `"above"` \| `"below"` | Trigger when price goes above or below target |
+| `from_token` | `"SOL"` \| `"USDC"` | Token to sell when alert fires |
+| `to_token` | `"SOL"` \| `"USDC"` | Token to buy when alert fires |
+| `amount` | number | Amount of `from_token` to swap |
+
+**Output:**
+```json
+{ "success": true, "alert_id": 3, "token": "SOL", "target_price": 150.0, "direction": "below", "from_token": "SOL", "to_token": "USDC", "amount": 1.0 }
+```
+
+---
+
+### `queueSigningRequest`
+
+Build a real Jupiter mainnet swap transaction and push it to the user's mobile app immediately. Call this when the agent decides a trade should happen right now (as opposed to setting up a future price alert).
+
+**Input:**
+```json
+{
+  "from_token": "SOL",
+  "to_token": "USDC",
+  "amount": 0.5,
+  "reason": "SOL dropped to $142 — executing your buy-the-dip strategy targeting $150 recovery."
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `from_token` | `"SOL"` \| `"USDC"` | Token to sell |
+| `to_token` | `"SOL"` \| `"USDC"` | Token to buy |
+| `amount` | number | Amount of `from_token` to swap |
+| `reason` | string | One sentence shown to the user on their phone explaining the trade |
+
+**Output:**
+```json
+{ "success": true, "tx_id": "2e31b14f-...", "connected_clients": 1, "message": "Signing request sent. The user will see: \"...\"" }
+```
+
+The tool simultaneously:
+1. Fetches a fresh Jupiter quote + builds a serialized v0 transaction
+2. Stores the pending tx in Postgres
+3. Broadcasts `tx_signing_request` over WebSocket to all connected clients
+4. Sends an Expo push notification to wake the app if it's in the background
+
+---
+
+### `getPendingSigningRequests`
+
+Check which signing requests are still awaiting user approval.
+
+**Input:** *(none)*
 
 **Output:**
 ```json
 {
-  "txId": "2e31b14f-1a42-4e91-8ffc-216e3f16c70d",
-  "fromToken": "SOL",
-  "toToken": "USDC",
-  "amount": 1,
-  "description": "Swap 1 SOL to USDC",
-  "payload": "eyJ0eElkIjoiMmUzMWIxNG...",
-  "status": "pending_signature"
+  "count": 1,
+  "pending": [
+    { "tx_id": "2e31b14f-...", "from_token": "SOL", "to_token": "USDC", "amount": 0.5, "expires_at": "2026-02-27T10:05:00.000Z" }
+  ]
 }
 ```
-
-| Field | Type | Description |
-|---|---|---|
-| `txId` | string (UUID) | Unique ID for this transaction |
-| `fromToken` | string | Source token |
-| `toToken` | string | Destination token |
-| `amount` | number | Amount being swapped |
-| `description` | string | Human-readable label |
-| `payload` | string (base64) | Serialized transaction bytes. In Phase 1 this is a base64-encoded JSON blob. In Phase 2+ this will be a real Solana transaction the mobile app passes to MWA for signing. |
-| `status` | string | Always `"pending_signature"` — the mobile app must sign and submit |
-
-> **Phase 2 note:** The `payload` field is what the mobile app will hand to Mobile Wallet Adapter (`signAndSendTransaction`). The shape of the output object is intentionally stable — only the `payload` contents change from mock to real.
-
----
-
-### `readFile` *(mock)*
-
-Reads a file from the filesystem. Phase 1 returns a canned string.
-
-**Input:** `{ "path": "/some/file.txt" }`
-**Output:** `{ "path": "/some/file.txt", "content": "[mock] Contents..." }`
-
----
-
-### `writeFile` *(mock)*
-
-Writes content to a file. Phase 1 does nothing.
-
-**Input:** `{ "path": "/some/file.txt", "content": "hello" }`
-**Output:** `{ "path": "/some/file.txt", "success": true, "message": "[mock] Would have written..." }`
 
 ---
 
 ## Mobile App Integration Guide
-
-This section describes exactly what a React Native (Expo) app needs to implement to talk to this server.
 
 ### Connection Setup
 
@@ -511,33 +718,39 @@ For local dev, replace `<server-host>` with your machine's LAN IP (e.g. `192.168
 
 ### Recommended Connection Pattern
 
-1. **On app start:** fetch `GET /agent/history` to hydrate the chat log
-2. **Open WS connection** and keep it open for the session lifetime
-3. **Send prompts** via the WS `prompt` message (preferred) or `POST /agent/prompt` (fire-and-forget)
-4. **Render streaming output** by appending `agent_delta.text` to the current message bubble
-5. **Finalize the message** when `agent_done` fires — replace the streamed content with the full `text` (they are identical, but `agent_done` is the authoritative signal)
-6. **Watch for `tool_call`** to show a "thinking / fetching price…" indicator
-7. **Watch for `tool_result` where `tool === "buildMockSwapTx"`** — this is the signing request the app will present to the user in Phase 2
+1. **On app start:** call `POST /device/register` with your Expo push token and wallet address
+2. **Fetch `GET /agent/history`** to hydrate the chat log
+3. **Open WS connection** and keep it open for the session lifetime
+4. **Send prompts** via the WS `prompt` message (preferred) or `POST /agent/prompt`
+5. **Render streaming output** by appending `agent_delta.text` to the current message bubble
+6. **Finalize the message** when `agent_done` fires — replace streamed content with the full `text`
+7. **Watch for `tool_call`** to show a "thinking / fetching price…" indicator
+8. **Watch for `tx_signing_request`** — present `AgentTxModal` with the trade details; on approval pass `serialized_tx` (base64) to MWA `signAndSendTransaction`; on completion send `tx_signed` back; on dismissal send `tx_rejected`
 
-### Signing Request Detection (Phase 2 preview)
+### Signing Request Flow
 
-When the agent builds a swap, the mobile app will receive:
+When the agent queues a swap (or a price alert fires), the mobile app receives a `tx_signing_request` WS message:
 
 ```json
 {
-  "type": "tool_result",
+  "type": "tx_signing_request",
   "payload": {
-    "tool": "buildMockSwapTx",
-    "output": {
-      "txId": "...",
-      "payload": "<base64 transaction>",
-      "status": "pending_signature"
-    }
+    "tx_id": "2e31b14f-...",
+    "from_token": "SOL",
+    "to_token": "USDC",
+    "amount": 0.5,
+    "serialized_tx": "<base64 Jupiter v0 transaction>",
+    "reason": "Agent's explanation shown to user",
+    "expires_at": "2026-02-27T10:05:00.000Z"
   }
 }
 ```
 
-The app should surface this as a confirmation card ("Agent wants to swap 1 SOL → USDC. Approve?"). On approval, pass `payload` to MWA's `signAndSendTransaction`. In Phase 1 the payload is fake — the UX flow can be wired up now without real signing.
+1. Show a modal: "Agent wants to swap 0.5 SOL → USDC. [reason]. Approve?"
+2. User taps **Sign & Send** → decode `serialized_tx` from base64 → pass to MWA `signAndSendTransaction`
+3. On success: send `{ "type": "tx_signed", "payload": { "tx_id": "...", "signature": "<base58>" } }`
+4. On rejection: send `{ "type": "tx_rejected", "payload": { "tx_id": "..." } }`
+5. **Check `expires_at`** before signing — refuse if the current time is past expiry (Jupiter quotes expire ~90s after creation)
 
 ### Session Management
 
@@ -550,10 +763,9 @@ The app should surface this as a confirmation card ("Agent wants to swap 1 SOL �
 | Scenario | What to do |
 |---|---|
 | WS close code `1008` | API key wrong — show config error |
-| `error` frame received | Show error message in chat, agent is still alive |
-| WS disconnects unexpectedly | Reconnect with exponential backoff |
-| `POST /agent/prompt` returns `401` | API key wrong |
-| `POST /agent/prompt` returns `400` | Empty prompt — validate before sending |
+| `error` frame received | Show error message in chat; agent is still alive |
+| WS disconnects unexpectedly | Reconnect with exponential backoff; server re-delivers pending signing requests on reconnect |
+| `tx_signing_request` past `expires_at` | Ignore and discard; a fresh one will arrive if the alert is still active |
 
 ---
 
@@ -582,13 +794,21 @@ curl -X POST http://localhost:8080/agent/prompt \
   -d '{"prompt": "What is the current price of SOL?"}'
 # → 202 { "session_id": "..." }
 
-# Fetch history
-curl http://localhost:8080/agent/history \
-  -H "X-Api-Key: change_me"
+# Create a price alert
+curl -X POST http://localhost:8080/orders/alert \
+  -H "X-Api-Key: change_me" \
+  -H "Content-Type: application/json" \
+  -d '{"token":"SOL","target_price":150,"direction":"below","from_token":"SOL","to_token":"USDC","amount":1}'
 
-# Stream the agent live
+# Simulate the alert firing
+curl -X POST http://localhost:8080/simulate/price-trigger \
+  -H "X-Api-Key: change_me" \
+  -H "Content-Type: application/json" \
+  -d '{"token":"SOL","price":140}'
+
+# Stream the agent live (connect first, then paste the prompt)
 npx wscat -c ws://localhost:8080/ws -H "X-Api-Key: change_me"
-# then paste: {"type":"prompt","payload":{"prompt":"Build me a SOL to USDC swap for 1 SOL"}}
+# → {"type":"prompt","payload":{"prompt":"Buy SOL when it drops below $150"}}
 ```
 
 ---
@@ -614,7 +834,7 @@ No Volume needed — all state lives in Postgres.
 | Phase | Status | Description |
 |---|---|---|
 | 1 | ✅ | Server + AI agent + REST/WS API |
-| 2 | 🔲 | Real signing requests — agent builds real Solana txs via Jupiter, mobile app signs with MWA |
+| 2 | ✅ | Real Jupiter mainnet swaps, price-triggered alerts, Expo push notifications, MWA signing |
 | 3 | 🔲 | Vault & offline fallback — device-key auth, vault keypair takes over when user is offline |
-| 4 | 🔲 | Real market integration — Helius price feeds, Jupiter swap quotes replace mocks |
+| 4 | 🔲 | Real market integration — Helius price feeds replace polling |
 | 5 | 🔲 | Hardening + SDK extraction — rate limiting, audit logs, publishable client SDK |

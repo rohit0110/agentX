@@ -23,6 +23,7 @@ export interface TxSigningRequest {
   to_token: string
   amount: number
   serialized_tx: string
+  reason: string
   trigger: {
     alert_id: number
     token: string

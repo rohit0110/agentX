@@ -10,8 +10,9 @@ export function AgentTxModal() {
 
   if (!pendingTx) return null
 
-  const { from_token, to_token, amount, trigger, expires_at } = pendingTx
+  const { from_token, to_token, amount, reason, trigger, expires_at } = pendingTx
   const expiresAt = new Date(expires_at).toLocaleTimeString()
+  const isAlertTrigger = trigger.alert_id > 0 && trigger.target_price > 0
 
   return (
     <Modal visible transparent animationType="fade" onRequestClose={() => rejectTx()}>
@@ -20,19 +21,27 @@ export function AgentTxModal() {
           <AppText type="title">Sign Transaction</AppText>
 
           <View style={styles.section}>
-            <AppText type="defaultSemiBold">Swap</AppText>
+            <AppText type="defaultSemiBold">Swapping</AppText>
             <AppText>
               {amount} {from_token} → {to_token}
             </AppText>
           </View>
 
-          <View style={styles.section}>
-            <AppText type="defaultSemiBold">Trigger</AppText>
-            <AppText>
-              {trigger.token} went {trigger.direction} ${trigger.target_price.toFixed(2)}
-            </AppText>
-            <AppText>Triggered at ${trigger.triggered_price.toFixed(2)}</AppText>
-          </View>
+          {!!reason && (
+            <View style={styles.section}>
+              <AppText type="defaultSemiBold">Reason</AppText>
+              <AppText>{reason}</AppText>
+            </View>
+          )}
+
+          {isAlertTrigger && (
+            <View style={styles.section}>
+              <AppText type="defaultSemiBold">Trigger</AppText>
+              <AppText>
+                {trigger.token} {trigger.direction} ${trigger.target_price.toFixed(2)} — hit at ${trigger.triggered_price.toFixed(2)}
+              </AppText>
+            </View>
+          )}
 
           <View style={styles.section}>
             <AppText type="defaultSemiBold">Expires</AppText>
